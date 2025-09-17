@@ -1,0 +1,122 @@
+#!/usr/bin/env python3
+"""
+Generate a noise-free simulated_power_trace.csv suitable for the CPA script `cpa_first_round.py`.
+
+Output CSV format (default):
+ - column 'plaintext' : 16-byte hex string (e.g. 00112233445566778899aabbccddeeff)
+ - columns 's000','s001',..., 'sNNN' : float power samples
+
+Simulation details (noise-free, ideal):
+ - User can provide a 16-byte AES key (hex) or let the script pick a random key.
+ - For each trace the script picks a random 16-byte plaintext.
+ - For each plaintext byte i, compute v = SBOX[plaintext[i] XOR key[i]] and hw = HammingWeight(v).
+ - Place the integer hw value (optionally scaled) at a unique sample index assigned to byte i.
+   All other samples are zero (no noise, no jitter) so peaks are exact and CPA should recover the key.
+
+Usage
+-----
+python simulated_power_trace_generator.py --out simulated_power_trace.csv --ntraces 500 --nsamples 800
+
+Options
+ - --key HEX        : 32-hex-char AES key (optional)
+ - --ntraces N       : number of traces to simulate (default 500)
+ - --nsamples M      : number of samples per trace (default 800)
+ - --peak_spacing P  : spacing in samples between byte peaks (default 4)
+ - --scale S         : multiply HW by S (float), default 1.0
+"""
+
+import argparse
+import numpy as np
+import pandas as pd
+import secrets
+
+SBOX = [
+0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+]
+
+HW_TABLE = [bin(i).count("1") for i in range(256)]
+
+
+def random_key_hex():
+    return secrets.token_hex(16)
+
+
+def generate_traces(key_bytes, n_traces=500, n_samples=800, peak_spacing=4, scale=1.0):
+    """Return (plaintexts_hex_list, traces_array)"""
+    # decide peak positions for each of the 16 bytes
+    # start a little after zero to avoid index issues
+    base = 10
+    peak_positions = [base + i * peak_spacing for i in range(16)]
+    max_pos = peak_positions[-1]
+    if n_samples <= max_pos:
+        raise ValueError("n_samples too small for chosen peak_spacing and base. Increase n_samples.")
+
+    traces = np.zeros((n_traces, n_samples), dtype=float)
+    plaintexts = []
+    for t in range(n_traces):
+        # random 16-byte plaintext
+        pt = secrets.token_bytes(16)
+        plaintexts.append(pt.hex())
+        # for each byte compute SBOX[pt ^ key] and place HW at peak position
+        for i in range(16):
+            v = SBOX[pt[i] ^ key_bytes[i]]
+            hw = HW_TABLE[v]
+            traces[t, peak_positions[i]] = float(hw) * float(scale)
+    return plaintexts, traces
+
+
+def save_csv(out_path, plaintexts, traces):
+    n_traces, n_samples = traces.shape
+    # create dataframe: plaintext column + s000..sNNN
+    cols = [f"s{j:03d}" for j in range(n_samples)]
+    df = pd.DataFrame(traces, columns=cols)
+    df.insert(0, "plaintext", plaintexts)
+    df.to_csv(out_path, index=False)
+    print(f"Saved {n_traces} traces x {n_samples} samples to {out_path}")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--out", default="simulated_power_trace.csv", help="output CSV path")
+    p.add_argument("--key", default=None, help="32-hex-char AES key (optional). If omitted a random key is used and printed.")
+    p.add_argument("--ntraces", type=int, default=500)
+    p.add_argument("--nsamples", type=int, default=800)
+    p.add_argument("--peak_spacing", type=int, default=4)
+    p.add_argument("--scale", type=float, default=1.0)
+    args = p.parse_args()
+
+    if args.key is None:
+        key_hex = random_key_hex()
+        print("No key provided. Using random key:", key_hex)
+    else:
+        key_hex = args.key.strip().lower()
+        if key_hex.startswith("0x"):
+            key_hex = key_hex[2:]
+        if len(key_hex) != 32 or any(c not in "0123456789abcdef" for c in key_hex):
+            raise ValueError("Key must be 32 hex chars (16 bytes).")
+
+    key_bytes = bytes.fromhex(key_hex)
+    plaintexts, traces = generate_traces(key_bytes, n_traces=args.ntraces, n_samples=args.nsamples, peak_spacing=args.peak_spacing, scale=args.scale)
+    save_csv(args.out, plaintexts, traces)
+    # also save the key used for later reference
+    with open(args.out.replace('.csv', '_key.txt'), 'w') as fk:
+        fk.write(key_hex + "\n")
+    print("Key saved to", args.out.replace('.csv', '_key.txt'))
+
+if __name__ == '__main__':
+    main()
